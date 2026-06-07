@@ -1,0 +1,11 @@
+# Core bot library (v20+ uses asyncio natively)
+python-telegram-bot==21.6
+
+# Background scheduler for the 5-minute question loop
+APScheduler==3.10.4
+
+# Async HTTP client for GitHub Models / OpenAI-compatible API calls
+httpx==0.27.2
+
+# Environment variable loader
+python-dotenv==1.0.1
