@@ -26,6 +26,8 @@ Note: Group/supergroup IDs are always NEGATIVE integers.
 import asyncio
 import logging
 import os
+import random
+from collections import deque
 from functools import wraps
 
 import httpx
@@ -80,6 +82,24 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 
 # We keep a reference to the PTB Application so the scheduler job can use it
 _app: "Application | None" = None
+
+# Question categories and simple in-memory history to avoid repetition
+CATEGORIES = [
+    "philosophy",
+    "science",
+    "psychology",
+    "existentialism",
+    "quantum",
+    "consciousness",
+    "ethics",
+    "reality",
+]
+
+# last chosen category (avoids same category back-to-back)
+last_category: str | None = None
+
+# keep last N questions to avoid exact repeats during runtime
+recent_questions: "deque[str]" = deque(maxlen=10)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  HELPERS
@@ -191,15 +211,60 @@ async def broadcast_question() -> None:
         return
 
     logger.info("Interval tick — generating question for group %d", TARGET_GROUP_ID)
-    question = await call_ai(
-        system_prompt=QUESTION_SYSTEM_PROMPT,
-        user_content="Generate the question now.",
-        max_tokens=120,
+    # Choose a category different from the last one to avoid repetition
+    def choose_category() -> str:
+        global last_category
+        options = [c for c in CATEGORIES if c != last_category]
+        if not options:
+            options = CATEGORIES
+        return random.choice(options)
+
+    category = choose_category()
+
+    # Build a focused user prompt that instructs the model about the category
+    user_content = (
+        f"Category: {category}\n"
+        "Generate ONE short, punchy question that sparks debate or deep thought. "
+        "Keep it under 2 sentences, use at most 1 emoji, and match the tone rules in the system prompt. "
+        "Do NOT add explanation — return only the question text."
     )
+
+    # Try a few times to avoid exact repeats from recent_questions
+    question = ""
+    max_tries = 4
+    for attempt in range(max_tries):
+        ai_reply = await call_ai(
+            system_prompt=QUESTION_SYSTEM_PROMPT,
+            user_content=user_content,
+            max_tokens=120,
+        )
+
+        candidate = (ai_reply or "").strip()
+        if not candidate:
+            logger.warning("AI returned empty question on attempt %d", attempt + 1)
+            continue
+
+        if candidate in recent_questions:
+            logger.info("AI produced recently-used question; retrying (attempt %d)", attempt + 1)
+            # nudge model to rephrase
+            user_content += "\nNote: Avoid repeating previous questions; rephrase strongly."
+            continue
+
+        # Accept candidate
+        question = candidate
+        break
+
+    if not question:
+        question = "⚠️ Couldn't generate a unique question right now. Try again later."
+
+    # Update history and last category if we produced a real question
+    if question and not question.startswith("⚠️"):
+        recent_questions.append(question)
+        last_category = category
 
     try:
         await _app.bot.send_message(chat_id=TARGET_GROUP_ID, text=question)
-        logger.info("Question sent: %s", question[:80])
+        logger.info("Question sent (category=%s): %s", category, question[:80])
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to send interval question: %s", exc)
 
